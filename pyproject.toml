@@ -13,7 +13,9 @@ dependencies = [
     "fire",
     "sentence-transformers",
     "accelerate",
-    "wordfreq"
+    "wordfreq",
+    "fastapi",
+    "uvicorn"
 ]
 
 [tool.hatch.build.targets.wheel]
