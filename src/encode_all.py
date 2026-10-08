@@ -4,6 +4,7 @@ This module exposes `Encoder` which wraps a dense encoder (Sentence
 Transformer) and a small `CustomBM25` class for sparse retrieval.
 """
 
+import os
 import re
 import math
 from collections import Counter
@@ -18,75 +19,124 @@ _PARTS = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
 
 
 class Encoder:
-    """Wrapper for text encoders: dense transformer + BM25 builder.
+    """Wrap the dense embedding model and the BM25 ranker.
 
     Attributes:
-        embeddings_matrix: Cached dense embeddings matrix (rows per document).
-        model_bm25: Optional CustomBM25 instance after building BM25.
-        model_trans: SentenceTransformer model used for dense embeddings.
+        embeddings_matrix: Cached dense embeddings matrix with one row per
+            document.
+        model_bm25: Optional BM25 model built from the indexed corpus.
+        model_trans: SentenceTransformer instance used for dense encoding.
     """
 
     def __init__(self) -> None:
+        """Initialize the encoder and load the configured model cache."""
         self.embeddings_matrix: Optional[np.ndarray] = None
         self.model_bm25: Optional["CustomBM25"] = None
+        cache_dir = (
+            os.getenv("HF_HOME")
+            or os.getenv("HUGGINGFACE_HUB_CACHE")
+            or os.getenv("TRANSFORMERS_CACHE")
+            or "/tmp/hf_cache"
+        )
         self.model_trans: Any = SentenceTransformer(
-            "TaylorAI/bge-micro-v2", cache_folder="/goinfre/vhedo-ga/hf_cache"
+            "TaylorAI/bge-micro-v2",
+            cache_folder=cache_dir,
         )
 
     def encode_dense(
             self,
             chunks_to_encode: List[str],
             documents: List[str]) -> np.ndarray:
-        """Encode documents into a dense embedding matrix.
+        """Encode text chunks into a dense embedding matrix.
 
-        If `chunks_to_encode` is empty, returns a zero matrix with the
-        expected embedding dimensionality (384).
+        Args:
+            chunks_to_encode: Text chunks to embed with the dense encoder.
+            documents: Full document texts used as a fallback when the chunk
+                list is empty.
+
+        Returns:
+            A dense embedding matrix with shape ``(n_documents, 384)`` when no
+            chunks are provided, or the embeddings for the provided chunks.
         """
         if chunks_to_encode:
-            embeddings_matrix = self.model_trans.encode(
-                chunks_to_encode,
-                batch_size=32,
-                show_progress_bar=True,
-                normalize_embeddings=True,
+            embeddings_matrix = np.asarray(
+                self.model_trans.encode(
+                    chunks_to_encode,
+                    batch_size=32,
+                    show_progress_bar=True,
+                    normalize_embeddings=True,
+                ),
+                dtype=np.float32,
             )
         else:
-            embeddings_matrix = np.zeros((len(documents), 384),
-                                         dtype=np.float32)
+            embeddings_matrix = np.zeros(
+                (len(documents), 384),
+                dtype=np.float32,
+            )
 
         self.embeddings_matrix = embeddings_matrix
         return embeddings_matrix
 
     def encode_bm25(self, documents: List[str]) -> "CustomBM25":
-        """Tokenize documents and build a `CustomBM25` model."""
-        tokenized_corpus: List[List[str]] = [self.tokenize_bm25(doc)
-                                             for doc in documents]
+        """Build and cache a BM25 model from a corpus of documents.
+
+        Args:
+            documents: Raw document strings to tokenize and index.
+
+        Returns:
+            A configured ``CustomBM25`` instance fitted on the provided corpus.
+        """
+        tokenized_corpus: List[List[str]] = [
+            self.tokenize_bm25(doc) for doc in documents
+        ]
         self.model_bm25 = CustomBM25(tokenized_corpus)
         return self.model_bm25
 
     def tokenize_bm25(self, text: str) -> List[str]:
-        """Lightweight BM25 tokenizer that also splits CamelCase and digits.
+        """Tokenize a text string for BM25 scoring.
 
-        Returns a list of lowercased tokens and additional subword parts.
+        The tokenizer lowercases words and expands CamelCase segments into
+        additional sub-tokens for better matching.
+
+        Args:
+            text: Raw text to tokenize.
+
+        Returns:
+            A list of normalized tokens suitable for BM25 indexing.
         """
         tokens: List[str] = []
         for word in _WORD.findall(text):
             tokens.append(word.lower())
-            parts = [p.lower() for p in _PARTS.findall(word.replace("_", " "))
-                     if len(p) > 1]
+            parts = [
+                p.lower()
+                for p in _PARTS.findall(word.replace("_", " "))
+                if len(p) > 1
+            ]
             if len(parts) > 1:
                 tokens.extend(parts)
         return tokens
 
 
 class CustomBM25:
-    """A minimal BM25 implementation over a tokenized corpus.
+    """Implement a compact BM25 ranking model over a tokenized corpus.
 
-    This implementation stores document frequencies, idf scores and the
-    per-document term frequencies needed to compute BM25 scores.
+    The class stores document frequencies, inverse document frequencies, and
+    per-document term counts needed to compute BM25 scores efficiently.
     """
 
-    def __init__(self, tokenized_corpus: List[List[str]],
-                 k1: float = 1.2, b: float = 0.75) -> None:
+    def __init__(
+        self,
+        tokenized_corpus: List[List[str]],
+        k1: float = 1.2,
+        b: float = 0.75,
+    ) -> None:
+        """Initialize the BM25 scorer.
+
+        Args:
+            tokenized_corpus: Tokenized documents used to build the index.
+            k1: BM25 saturation parameter.
+            b: BM25 length-normalization parameter.
+        """
         self.k1: float = k1
         self.b: float = b
         self.N: int = len(tokenized_corpus)
@@ -103,17 +153,23 @@ class CustomBM25:
 
         self.idf: Dict[str, float] = {}
         for word, freq in self.df.items():
-            self.idf[word] = math.log(((self.N - freq + 0.5)
-                                       / (freq + 0.5)) + 1.0)
+            self.idf[word] = math.log(
+                ((self.N - freq + 0.5) / (freq + 0.5)) + 1.0
+            )
 
-        self.doc_term_freqs: List[Counter[str]] = [Counter(doc) for doc
-                                                   in tokenized_corpus]
+        self.doc_term_freqs: List[Counter[str]] = [
+            Counter(doc) for doc in tokenized_corpus
+        ]
         self.doc_lens: List[int] = [len(doc) for doc in tokenized_corpus]
 
     def get_scores(self, query: List[str]) -> np.ndarray:
-        """Compute BM25 scores for a tokenized query over all documents.
+        """Compute BM25 scores for a tokenized query.
 
-        Returns an array of shape (N,) with floating point scores.
+        Args:
+            query: Tokens to score against the indexed corpus.
+
+        Returns:
+            A NumPy array with one BM25 score per document.
         """
         scores: np.ndarray = np.zeros(self.N, dtype=np.float32)
         for word in query:
@@ -124,8 +180,8 @@ class CustomBM25:
                     if tf > 0:
                         num = tf * (self.k1 + 1.0)
                         den = tf + self.k1 * (
-                            1.0 - self.b + self.b *
-                            (self.doc_lens[i] / self.avgdl)
+                            1.0 - self.b
+                            + self.b * (self.doc_lens[i] / self.avgdl)
                         )
                         scores[i] += idf * (num / den)
         return scores

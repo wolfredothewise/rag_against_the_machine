@@ -16,23 +16,37 @@ TARGET_DATASET = os.environ.get("RAG_TARGET", "all")
 
 
 class SearchIndex:
-    """Build and persist a hybrid index from processed chunks."""
+    """Build and persist the retrieval index for processed chunks.
+
+    The index combines dense embeddings and a BM25 model so later queries can
+    be scored against the same encoded corpus.
+    """
 
     def __init__(self) -> None:
-        """Initialize the encoder used for dense and BM25 indexing."""
+        """Initialize the encoder and index storage.
+
+        This creates the dense encoder and the data structures required to
+        store chunk metadata and embeddings before indexing.
+        """
         self.encoder = Encoder()
         self.clean_data = CleanData()
-        self.embeddings_matrix = None
-        self.model_bm25 = None
+        self.embeddings_matrix: Any = None
+        self.model_bm25: Any = None
 
-    def ingest_chunks(self, chunks_list):
-        """Encode input chunks, build the index, and persist it to disk."""
+    def ingest_chunks(self, chunks_list: list[tuple[str, int, int]]) -> None:
+        """Encode chunk text, build the retrieval index, and save it to disk.
+
+        Args:
+            chunks_list: A list of tuples in the form
+                ``(file_path, first_character_index, last_character_index)``.
+        """
         chunks_to_encode, documents, metadata = (
             self.clean_data.prepare_chunks_for_encode(chunks_list)
         )
 
         self.embeddings_matrix = self.encoder.encode_dense(
-            chunks_to_encode, documents
+            chunks_to_encode,
+            documents,
         )
         self.model_bm25 = self.encoder.encode_bm25(documents)
 
@@ -44,27 +58,37 @@ class SearchIndex:
             "embeddings_matrix": self.embeddings_matrix,
         }
 
-        with open("data/processed/bm25_index.pkl", "wb") as file:
+        with open("data/processed/hybrid_index.pkl", "wb") as file:
             pickle.dump(index_data, file)
 
-        index_size_kb = os.path.getsize("data/processed/bm25_index.pkl") / 1024
+        index_size_kb = os.path.getsize(
+            "data/processed/hybrid_index.pkl") / 1024
         print(f" -> Index size: {index_size_kb} KB")
 
 
 class HybridRetriever:
-    """Load persisted vectors and combine BM25 and dense retrieval."""
+    """Load a persisted index and rank retrieval results by hybrid scoring.
+
+    The retriever combines BM25 lexical signals with dense semantic signals,
+    then filters the final candidates by dataset target type.
+    """
 
     def __init__(self) -> None:
-        """Initialize the retriever and active target."""
+        """Initialize the retriever and the active target mode."""
         self.encoder = Encoder()
         self.target = os.environ.get("RAG_TARGET", "all")
         self.model: Any = None
         self.metadata: list[Any] = []
         self.embeddings_matrix: Any = None
 
-    def load_index(self):
-        """Load the precomputed retrieval index from disk."""
-        index_path = "data/processed/bm25_index.pkl"
+    def load_index(self) -> tuple[Any, list[Any], list[str], Any]:
+        """Load the precomputed retrieval index from disk.
+
+        Returns:
+            A tuple containing the BM25 model, chunk metadata, documents, and
+            the dense embedding matrix.
+        """
+        index_path = "data/processed/hybrid_index.pkl"
         if not os.path.exists(index_path):
             raise FileNotFoundError(
                 "ERROR: El índice no existe. Ejecuta primero el comando "
@@ -80,8 +104,18 @@ class HybridRetriever:
 
         return model, metadata, documents, embeddings_matrix
 
-    def hybrid_algorithm(self, querys, k) -> StudentSearchResults:
-        """Retrieve the top sources for each question using hybrid ranking."""
+    def hybrid_algorithm(self, querys: Any, k: int) -> StudentSearchResults:
+        """Retrieve the top sources for each question using hybrid ranking.
+
+        Args:
+            querys: Iterable of question objects with ``question_id`` and
+                ``question`` attributes.
+            k: Maximum number of returned sources per question.
+
+        Returns:
+            A ``StudentSearchResults`` object containing the fused retrieval
+            results for each query.
+        """
         (
             self.model,
             self.metadata,
@@ -101,7 +135,8 @@ class HybridRetriever:
             scores_dense = self.embeddings_matrix @ tokenized_query_dense
 
             scores_bm25, scores_dense = self._apply_target_filter(
-                scores_bm25, scores_dense
+                scores_bm25,
+                scores_dense,
             )
 
             valid_bm25 = [
@@ -137,12 +172,23 @@ class HybridRetriever:
 
     def reciprocal_rank_fusion(
         self,
-        top_k_bm25_indices,
-        top_k_dense_indices,
+        top_k_bm25_indices: list[int],
+        top_k_dense_indices: Any,
         k: int,
         k_rrf: int = 60,
-    ):
-        """Fuse BM25 and dense rankings using reciprocal rank fusion."""
+    ) -> list[MinimalSource]:
+        """Fuse BM25 and dense rankings with reciprocal rank fusion.
+
+        Args:
+            top_k_bm25_indices: Candidate indices from the lexical ranker.
+            top_k_dense_indices: Candidate indices from the dense ranker.
+            k: Maximum number of sources to keep.
+            k_rrf: Reciprocal-rank fusion constant used by the RRF formula.
+
+        Returns:
+            A ranked list of minimal source records that matches the current
+            target type.
+        """
         bm25_weight, dense_weight = self._get_search_weights()
 
         rrf_scores: dict[Any, float] = defaultdict(float)
@@ -165,7 +211,7 @@ class HybridRetriever:
             key=lambda item: item[1],
             reverse=True,
         )[:k]
-        retrieved_sources = []
+        retrieved_sources: list[MinimalSource] = []
 
         for index, _ in ranking_final:
             file_path, fci, lci = self.metadata[index]
@@ -190,7 +236,11 @@ class HybridRetriever:
         return retrieved_sources
 
     def _get_search_weights(self) -> tuple[float, float]:
-        """Return the BM25 and dense weights for the active mode."""
+        """Return the BM25 and dense retrieval weights for the active mode.
+
+        Returns:
+            A tuple ``(bm25_weight, dense_weight)`` used during hybrid ranking.
+        """
         if MODE == "bm25":
             bm25_weight = 1.0
             dense_weight = 0.0
@@ -203,8 +253,21 @@ class HybridRetriever:
 
         return bm25_weight, dense_weight
 
-    def _apply_target_filter(self, scores_bm25, scores_dense):
-        """Remove chunks that do not match the selected target type."""
+    def _apply_target_filter(
+        self,
+        scores_bm25: Any,
+        scores_dense: Any,
+    ) -> tuple[Any, Any]:
+        """Mask scores for chunks that do not match the selected target type.
+
+        Args:
+            scores_bm25: BM25 scores for every chunk.
+            scores_dense: Dense scores for every chunk.
+
+        Returns:
+            The filtered score arrays with non-matching target chunks set to
+            negative infinity.
+        """
         for i, meta in enumerate(self.metadata):
             file_path = meta[0]
             if self.target == "docs" and file_path.endswith(".py"):

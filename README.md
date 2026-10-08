@@ -108,7 +108,7 @@ The retrieval layer deliberately combines complementary representations.
 Chunks and questions are encoded with a Hugging Face Sentence Transformer
 (`TaylorAI/bge-micro-v2` in the current implementation). Embeddings are
 L2-normalized, so the matrix product
-![alt text](image-3.png)
+![Cosine similarity](images/image-3.png)
 ```text
 similarity(query, chunk) = normalized_query · normalized_chunk
 ```
@@ -121,7 +121,7 @@ can be semantically close even when they do not share the same words.
 The lexical path is a custom BM25 implementation, not a black-box search
 service. Tokenization keeps identifiers useful by splitting words such as
 `max_context_length` and CamelCase into searchable sub-parts.
-![alt text](image-2.png)
+![BM25 score diagram](images/image-2.png)
 For a term `t` in document `d`, the score uses:
 
 ```text
@@ -148,7 +148,7 @@ For each candidate at rank `r`, RRF contributes:
 ```text
 RRF(document) = Σ weight_i / (60 + rank_i + 1)
 ```
-![alt text](image-1.png)
+![RRF weighting](images/image-1.png)
 The current hybrid weighting gives BM25 a `1.9` weight and dense retrieval a
 `1.0` weight. A document ranked well by either engine receives signal; a
 document ranked well by both gets the strongest combined position. This is the
@@ -294,7 +294,7 @@ make run
 Run the required CLI stages individually:
 
 ```bash
-# Build data/processed/bm25_index.pkl
+# Build data/processed/hybrid_index.pkl
 uv run python -m src index --max_chunk_size 2000
 
 # Search one query

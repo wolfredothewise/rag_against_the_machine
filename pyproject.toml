@@ -13,19 +13,8 @@ dependencies = [
     "fire",
     "sentence-transformers",
     "accelerate",
-    "wordfreq",
-    "fastapi",
-    "uvicorn"
+    "wordfreq"
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
-
-
-[tool.mypy]
-exclude = ["llm_sdk"]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = ["llm_sdk", "llm_sdk.*"]
-ignore_errors = true
